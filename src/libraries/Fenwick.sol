@@ -2,20 +2,15 @@
 pragma solidity ^0.8.0;
 
 library Fenwick {
-    function suffixSum(uint256[] storage self, uint256 index) internal view returns (uint256 sum) {
-        while (index <= self.length) {
+    function suffixSum(mapping(uint256 => uint256) storage self, uint256 len, uint256 index) internal view returns (uint256 sum) {
+        while (index <= len) {
             sum += self[index - 1];
             index += lsb(index);
         }
     }
 
-    function rangeSum(uint256[] storage self, uint256 l, uint256 r) internal view returns (uint256) {
-        return suffixSum(self, l) - (r < self.length ? suffixSum(self, r + 1) : 0);
-    }
-
-    function append(uint256[] storage self, uint256 value) internal {
-        self.push();
-        increment(self, self.length, value);
+    function rangeSum(mapping(uint256 => uint256) storage self, uint256 len, uint256 l, uint256 r) internal view returns (uint256) {
+        return suffixSum(self, len, l) - (r < len ? suffixSum(self, len, r + 1) : 0);
     }
 
     function increment(uint256[] storage self, uint256 index, uint256 delta) internal {

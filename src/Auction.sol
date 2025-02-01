@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
-import "./interfaces/SimpleERC20.sol";
+import "solmate/tokens/ERC20.sol";
+import "./interfaces/IAMM.sol";
 import "./libraries/Fenwick.sol";
 
-uint256 constant timeout = 1 minutes; // Time without bids for an auction to be finalized.
+uint256 constant timeout = 1 hours; // Time without bids for an auction to be finalized.
 
-contract AuctionAMM {
-    using Fenwick for uint256[];
+contract Auction {
+    using Fenwick for mapping(uint256 => uint256);
+    uint256 public reserve0;
+    uint256 public reserve1;
 
-    struct LP {
+    struct Surplus {
         address payable owner;
         uint256 shares;
         uint256 start;
@@ -25,93 +28,36 @@ contract AuctionAMM {
         bool isBuy;
     }
 
-    LP[] public LPs;
     Auction[] public auctions;
-    uint256[] public surplus;
-
-    uint256 public outcomeMax; // Maximum amount of outcome tokens to be sold.
-    uint256 public outcome; // Amount of outcome tokens sold.
-    uint256 public underlying; // Underlying collected as part of the AMM.
-    uint256 public totalShares; // Total surplus collected.
-    ERC20 public outcomeToken; // The outcome token traded.
-    ERC20 public underlyingToken; // The underlying token traded.
-
-
-    /// @dev Initialize the pool. Need to compute ofchain the amounts required.
-    /// @param _outcome The amount of virtual outcome tokens sold.
-    /// @param _outcomeMax The maximum amount of outcome tokens that can be sold.
-    /// @param _outcomeToken The outcome token to be traded.
-    /// @param _underlyingToken The underlying token to be traded.
-    constructor(uint256 _outcome, uint256 _outcomeMax, ERC20 _outcomeToken, ERC20 _underlyingToken) payable {
-        require(_outcome <= _outcomeMax); // Can't have sold more than the max.
-
-        outcomeMax = _outcomeMax;
-        outcome = _outcome;
-        outcomeToken = _outcomeToken;
-        require(outcomeToken.transferFrom(msg.sender, address(this), _outcomeMax - _outcome));
-
-        underlyingToken = _underlyingToken;
-        underlying = outcomeCost(_outcome, 0, _outcomeMax);
-        require(underlyingToken.transferFrom(msg.sender, address(this), underlying));
+    mapping(uint256 => uint256) public surplus;
+    IAMM public amm;
+    bool public initialized;
+    function initialize(IAMM _amm) external {
+        require(!initialized, "Already initialized");
+        amm = _amm;
+        initialized = true;
     }
 
-    function outcomeCost(uint256 _outcomeOut, uint256 _outcome, uint256 _outcomeMax) internal pure returns (uint256) {
-        return (_outcomeOut * (_outcome + _outcomeOut/2)) / _outcomeMax;
-    }
-
-    /// @dev Buy outcome tokens.
-    /// @param _outcomeOut Amount of outcome tokens to buy.
-    function swapExactOutcomeForUnderlying(uint256 _outcomeOut) public payable {
-        require(outcome + _outcomeOut <= outcomeMax); // Can't buy more than the max available.
-        uint256 cost = outcomeCost(_outcomeOut, outcome, outcomeMax);
-        underlying += cost;
-        outcome += _outcomeOut;
-
-        auctions.push(Auction({ // Create an auction.
-            outcome: _outcomeOut,
-            price: cost,
-            totalShares: totalShares,
+    function swap(uint amount0Out, uint amount1Out, address to) external {
+        bool isBuy = amount1Out > 0;
+        // amm is trusted not to re-enter
+        amm.swap(amount0Out, amount1Out, address(this));
+        uint256 delta = isBuy ? 
+            ERC20(amm.token1()).balanceOf(address(this)) - reserve1 : 
+            ERC20(amm.token0()).balanceOf(address(this)) - reserve0;
+        auctions.push(Auction({
+            outcome: isBuy ? delta : 0,
+            price: isBuy ? 0 : delta,
+            totalShares: amm.totalSupply(),
             lastTime: uint64(block.timestamp),
-            winner: payable(msg.sender),
-            isBuy: true
+            winner: to,
+            isBuy: amount1Out > 0
         }));
-
-        require(underlyingToken.transferFrom(msg.sender, address(this), cost));
-    }
-
-    /// @dev Sell outcome tokens.
-    /// @param _outcomeIn Amount of tokens to sell.
-    function sell(uint256 _outcomeIn) public {
-        require(outcomeToken.transferFrom(msg.sender, address(this), _outcomeIn));
-
-        outcome -= _outcomeIn; // Note that it would revert if trying to sell more than possible.
-        uint256 toReceive = outcomeCost(_outcomeIn, outcome, outcomeMax);
-        underlying -= toReceive;
-        auctions.push(Auction({ // Create a descending auction.
-            outcome: _outcomeIn,
-            price: toReceive,
-            totalShares: totalShares,
-            lastTime: uint64(block.timestamp),
-            winner: payable(msg.sender),
-            isBuy: false
-        }));
-        surplus.append(0);
     }
 
     /// @dev Add liquidity.
     function addLiquidity() public payable {
-        uint256 oldUnderlying = underlying;
-        uint256 newUnderlying = oldUnderlying + msg.value;
-        uint256 newOutcomeMax = (outcomeMax * newUnderlying) / underlying;
-        uint256 newOutcome = (outcome * newUnderlying) / underlying;
-        uint256 outcomeIn =  (newOutcomeMax - newOutcome) - (outcomeMax - outcome);
-
-        underlying = newUnderlying;
-        outcomeMax = newOutcomeMax;
-        outcome = newOutcome;
-
-        uint256 mintShares = oldUnderlying > 0 ? msg.value * totalShares / oldUnderlying : newUnderlying;
-        totalShares += mintShares;
+        
         LPs.push(LP({
             owner: payable(msg.sender),
             shares: mintShares,
